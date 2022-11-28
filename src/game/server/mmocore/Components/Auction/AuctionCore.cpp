@@ -11,11 +11,11 @@ constexpr auto TW_AUCTION_TABLE = "tw_auction_items";
 
 void CAuctionCore::OnTick()
 {
-	if(GS()->GetWorldID() == MAIN_WORLD_ID)
-	{
-		if(Server()->Tick() % (1 * Server()->TickSpeed() * (g_Config.m_SvTimeCheckAuction * 60)) == 0)
-			CheckAuctionTime();
-	}
+	//if(GS()->GetWorldID() == MAIN_WORLD_ID) TODO: fix and rebuild me
+	//{
+	//	if(Server()->Tick() % (1 * Server()->TickSpeed() * (g_Config.m_SvTimeCheckAuction * 60)) == 0)
+	//		CheckAuctionTime();
+	//}
 }
 
 bool CAuctionCore::OnHandleTile(CCharacter* pChr, int IndexCollision)
@@ -212,7 +212,7 @@ void CAuctionCore::CreateAuctionSlot(CPlayer* pPlayer, CAuctionSlot* pAuctionDat
 
 void CAuctionCore::CheckAuctionTime() const
 {
-	ResultPtr pRes = Database->Execute<DB::SELECT>("*", TW_AUCTION_TABLE, "WHERE UserID > 0 AND DATE_SUB(NOW(),INTERVAL %d MINUTE) > Time", g_Config.m_SvTimeAuctionSlot);
+	ResultPtr pRes = Database->Execute<DB::SELECT>("*", TW_AUCTION_TABLE, "WHERE UserID > 0 AND DATE_SUB(NOW(),INTERVAL %d MINUTE) > ValidUntil", g_Config.m_SvTimeAuctionSlot);
 	int ReleaseSlots = (int)pRes->rowsCount();
 	while(pRes->next())
 	{

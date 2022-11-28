@@ -3,17 +3,20 @@
 #include <game/server/mmocore/Components/Bots/BotData.h>
 #include "quest_path_finder.h"
 
-#include <game/server/mmocore/Components/Worlds/WorldSwapCore.h>
+#include <game/server/mmocore/Components/Worlds/WorldCore.h>
 #include <game/server/gamecontext.h>
 
 CQuestPathFinder::CQuestPathFinder(CGameWorld* pGameWorld, vec2 Pos, int ClientID, QuestBotInfo QuestBot)
 : CEntity(pGameWorld, CGameWorld::ENTTYPE_FINDQUEST, Pos)
 {
-	m_PosTo = GS()->Mmo()->WorldSwap()->GetPositionQuestBot(ClientID, QuestBot);
+	vec2 GetterPos{0,0};
+	GS()->Mmo()->WorldSwap()->FindPosition(QuestBot.m_WorldID, QuestBot.m_Position, &GetterPos);
+
+	m_PosTo = GetterPos;
 	m_ClientID = ClientID;
 	m_pPlayer = GS()->GetPlayer(m_ClientID, true, true);
 	m_SubBotID = QuestBot.m_SubBotID;
-	m_MainScenario = str_startswith(GS()->GetQuestInfo(QuestBot.m_QuestID).GetStory(), "Main") != nullptr;
+	m_MainScenario = str_startswith_nocase(GS()->GetQuestInfo(QuestBot.m_QuestID).GetStory(), "Ch") != nullptr;
 
 	m_pPlayer->m_aQuestPathFinders.push_back(this);
 	GameWorld()->InsertEntity(this);
@@ -41,7 +44,7 @@ void CQuestPathFinder::Tick()
 
 	const int QuestID = QuestBotInfo::ms_aQuestBot[m_SubBotID].m_QuestID;
 	const int Step = QuestBotInfo::ms_aQuestBot[m_SubBotID].m_Step;
-	if (m_pPlayer->GetQuest(QuestID).m_Step != Step || m_pPlayer->GetQuest(QuestID).GetState() != QuestState::QUEST_ACCEPT || m_pPlayer->GetQuest(QuestID).m_StepsQuestBot[m_SubBotID].m_StepComplete)
+	if (m_pPlayer->GetQuest(QuestID).m_Step != Step || m_pPlayer->GetQuest(QuestID).GetState() != QuestState::ACCEPT || m_pPlayer->GetQuest(QuestID).m_StepsQuestBot[m_SubBotID].m_StepComplete)
 	{
 		GS()->CreateDeath(m_Pos, m_ClientID);
 		Reset();

@@ -76,6 +76,7 @@ public:
 	CQuestDataInfo &GetQuestInfo(int QuestID) const;
 	class CAttributeDescription* GetAttributeInfo(AttributeIdentifier ID) const;
 	class CWarehouse* GetWarehouse(int ID) const;
+	class CWorldData* GetWorldData(int ID = -1) const;
 
 	/* #########################################################################
 		EVENTS
@@ -238,12 +239,10 @@ public:
 	bool IsAllowedPVP() const { return m_AllowedPVP; }
 
 	bool IsPlayersNearby(vec2 Pos, float Distance) const;
-	void SetRespawnWorld(int WorldID) { m_RespawnWorldID = WorldID; }
 	int GetRespawnWorld() const { return m_RespawnWorldID; }
 
 private:
-	void InitZonePVP();
-	void InitZoneDungeon();
+	void InitZones();
 
 	bool m_AllowedPVP;
 	int m_DayEnumType;

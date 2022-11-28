@@ -10,6 +10,7 @@ enum QuestInteractive
 {
 	// INTERACTIVE_RANDOM_ACCEPT_ITEM = 1, // Todo this, it is necessary to lead to a fully understandable view of the conversation steps and refactoring it
 	INTERACTIVE_DROP_AND_TAKE_IT = 2,
+	INTERACTIVE_SHOW_ITEMS = 3,
 };
 
 class QuestCore : public MmoComponent
@@ -43,7 +44,7 @@ public:
 	void ShowQuestsActiveNPC(CPlayer* pPlayer, int QuestID);
 
 private:
-	void ShowQuestsTabList(CPlayer* pPlayer, int StateQuest);
+	void ShowQuestsTabList(CPlayer* pPlayer, QuestState State);
 	void ShowQuestID(CPlayer *pPlayer, int QuestID);
 
 public:

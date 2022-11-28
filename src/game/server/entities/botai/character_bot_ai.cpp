@@ -55,6 +55,7 @@ bool CCharacterBotAI::Spawn(class CPlayer *pPlayer, vec2 Pos)
 	}
 	else if(m_pBotPlayer->GetBotType() == TYPE_BOT_EIDOLON)
 	{
+		m_Core.m_Solo = true;
 		int ClientID = m_pBotPlayer->GetCID();
 		int OwnerCID = m_pBotPlayer->GetEidolonOwner()->GetCID();
 		new CEidolon(&GS()->m_World, Pos, 0, ClientID, OwnerCID);
@@ -84,6 +85,10 @@ bool CCharacterBotAI::TakeDamage(vec2 Force, int Dmg, int From, int Weapon)
 
 	// dissalow for self damage except type mobs
 	if(m_pBotPlayer->GetBotType() != TYPE_BOT_MOB)
+		return false;
+
+	// dissalow entered line damage
+	if(GS()->Collision()->IntersectLineColFlag(m_Core.m_Pos, pFrom->GetCharacter()->m_Core.m_Pos, nullptr, nullptr, CCollision::COLFLAG_DISALLOW_MOVE))
 		return false;
 
 	// dissalow damage from bot to bot except type eidolon
@@ -212,23 +217,24 @@ void CCharacterBotAI::Tick()
 
 	// check safe area
 	ResetSafe();
-	if(GS()->Collision()->CheckPoint(m_Core.m_Pos, CCollision::COLFLAG_SAFE_AREA))
+	if(GS()->Collision()->CheckPoint(m_Core.m_Pos, CCollision::COLFLAG_SAFE_AREA) || m_pBotPlayer->GetBotType() == TYPE_BOT_EIDOLON)
 		SetSafe();
 
-	EngineBots();
-	HandleEvents();
-	// safe change world data from tick
-	int Index;
-	HandleTilesets(&Index);
-
+	// engine bots
+	HandleBot();
+	HandleTilesets();
 	HandleTuning();
+
+	// core
 	m_Core.m_Input = m_Input;
 	m_Core.Tick(true, &m_pBotPlayer->m_NextTuningParams);
 	m_pBotPlayer->UpdateTempData(m_Health, m_Mana);
 
+	// game clipped
 	if(GameLayerClipped(m_Pos))
 		Die(m_pBotPlayer->GetCID(), WEAPON_SELF);
 
+	// door
 	if (!m_DoorHit)
 	{
 		m_OlderPos = m_OldPos;
@@ -259,6 +265,7 @@ void CCharacterBotAI::Snap(int SnappingClient)
 	if(NetworkClipped(SnappingClient) || !Server()->Translate(ID, SnappingClient) || !m_pBotPlayer->IsVisibleForClient(SnappingClient))
 		return;
 
+	// Character
 	CNetObj_Character* pCharacter = static_cast<CNetObj_Character*>(Server()->SnapNewItem(NETOBJTYPE_CHARACTER, ID, sizeof(CNetObj_Character)));
 	if(!pCharacter)
 		return;
@@ -290,10 +297,32 @@ void CCharacterBotAI::Snap(int SnappingClient)
 	pCharacter->m_Health = 0;
 	pCharacter->m_Armor = 0;
 	pCharacter->m_PlayerFlags = m_pBotPlayer->m_PlayerFlags;
+
+	// DDNetCharacter
+	CNetObj_DDNetCharacter* pDDNetCharacter = static_cast<CNetObj_DDNetCharacter*>(Server()->SnapNewItem(NETOBJTYPE_DDNETCHARACTER, ID, sizeof(CNetObj_DDNetCharacter)));
+	if(!pDDNetCharacter)
+		return;
+
+	pDDNetCharacter->m_Flags = 0;
+#define DDNetFlag(flag, check) if(check) { pDDNetCharacter->m_Flags |= (flag); }
+	if(m_pBotPlayer->GetBotType() == TYPE_BOT_EIDOLON)
+	{
+		DDNetFlag(CHARACTERFLAG_SOLO, false)
+		DDNetFlag(CHARACTERFLAG_COLLISION_DISABLED, true)
+	}
+#undef DDNetFlag
+
+	pDDNetCharacter->m_Jumps = m_Core.m_Jumps;
+	pDDNetCharacter->m_TeleCheckpoint = 0;
+	pDDNetCharacter->m_StrongWeakID = 0; // ???
+
+	// Display Informations
+	pDDNetCharacter->m_TargetX = m_Core.m_Input.m_TargetX;
+	pDDNetCharacter->m_TargetY = m_Core.m_Input.m_TargetY;
 }
 
 // interactive bots
-void CCharacterBotAI::EngineBots()
+void CCharacterBotAI::HandleBot()
 {
 	if(m_pBotPlayer->GetBotType() == TYPE_BOT_MOB)
 	{
@@ -321,6 +350,8 @@ void CCharacterBotAI::EngineBots()
 
 	else if(m_pBotPlayer->GetBotType() == TYPE_BOT_EIDOLON)
 		EngineEidolons();
+
+	HandleEvent();
 }
 
 // interactive of NPC
@@ -542,8 +573,6 @@ void CCharacterBotAI::Move()
 	if(Index > -1)
 		WayDir = normalize(m_pBotPlayer->GetWayPoint(Index) - GetPos());
 
-	// set the direction
-	const bool IsCollide = GS()->Collision()->IntersectLineWithInvisible(m_Pos, m_Pos + vec2(m_Input.m_Direction, 0) * 150, &m_WallPos, nullptr);
 
 	if(WayDir.x < 0 && ActiveWayPoints > 3)
 		m_Input.m_Direction = -1;
@@ -553,7 +582,7 @@ void CCharacterBotAI::Move()
 		m_Input.m_Direction = m_PrevDirection;
 
 	// check dissalow move
-	if(m_pBotPlayer->GetBotType() != BotsTypes::TYPE_BOT_EIDOLON && IsCollisionFlag(CCollision::COLFLAG_DISALLOW_MOVE))
+	if(m_pBotPlayer->GetBotType() != TYPE_BOT_EIDOLON && IsCollisionFlag(CCollision::COLFLAG_DISALLOW_MOVE))
 	{
 		m_Input.m_Direction = -m_Input.m_Direction;
 		m_DoorHit = true;
@@ -564,8 +593,8 @@ void CCharacterBotAI::Move()
 	const bool IsGround = IsGrounded();
 	if((IsGround && WayDir.y < -0.5) || (!IsGround && WayDir.y < -0.5 && m_Core.m_Vel.y > 0))
 		m_Input.m_Jump = 1;
-
-	if(IsCollide)
+	
+	if(GS()->Collision()->IntersectLineWithInvisible(m_Pos, m_Pos + vec2(m_Input.m_Direction, 0) * 150, &m_WallPos, nullptr))
 	{
 		if(IsGround && GS()->Collision()->IntersectLine(m_WallPos, m_WallPos + vec2(0, -1) * 210, nullptr, nullptr))
 			m_Input.m_Jump = 1;
@@ -596,6 +625,8 @@ void CCharacterBotAI::Move()
 			else
 				HookVel.x *= 0.75f;
 
+			HookVel += vec2(0, 1) * GS()->Tuning()->m_Gravity;
+
 			float ps = dot(WayDir, HookVel);
 			if(ps > 0 || (WayDir.y < 0 && m_Core.m_Vel.y > 0.f && m_Core.m_HookTick < SERVER_TICK_SPEED + SERVER_TICK_SPEED / 2))
 				m_Input.m_Hook = 1;
@@ -604,7 +635,7 @@ void CCharacterBotAI::Move()
 		}
 		else if(m_Core.m_HookState == HOOK_FLYING)
 			m_Input.m_Hook = 1;
-		else if(m_LatestInput.m_Hook == 0 && m_Core.m_HookState == HOOK_IDLE)
+		else if(m_LatestInput.m_Hook == 0 && m_Core.m_HookState == HOOK_IDLE && random_int() % 3 == 0)
 		{
 			int NumDir = 45;
 			vec2 HookDir(0.0f, 0.0f);
@@ -639,6 +670,7 @@ void CCharacterBotAI::Move()
 					}
 				}
 			}
+
 			if(length(HookDir) > 32.f)
 			{
 				SetAim(HookDir);

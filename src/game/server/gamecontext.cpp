@@ -33,6 +33,7 @@
 #include <cstdarg>
 
 #include "mmocore/Components/Warehouse/WarehouseData.h"
+#include "mmocore/Components/Worlds/WorldData.h"
 
 // static data that have the same value in different objects
 std::unordered_map < std::string, int > CGS::ms_aEffects[MAX_PLAYERS];
@@ -143,7 +144,7 @@ CAttributeDescription* CGS::GetAttributeInfo(AttributeIdentifier ID) const
 {
 	dbg_assert(CAttributeDescription::Data().find(ID) != CAttributeDescription::Data().end(), "invalid referring to the CAttributeDescription");
 
-	return &CAttributeDescription::Data()[ID];
+	return CAttributeDescription::Data()[ID].get();
 }
 
 CWarehouse* CGS::GetWarehouse(int ID) const
@@ -151,6 +152,15 @@ CWarehouse* CGS::GetWarehouse(int ID) const
 	dbg_assert(CWarehouse::Data().find(ID) != CWarehouse::Data().end(), "invalid referring to the CWarehouse");
 
 	return &CWarehouse::Data()[ID];
+}
+
+CWorldData* CGS::GetWorldData(int ID) const
+{
+	int WorldID = ID == -1 ? GetWorldID() : ID;
+	auto p = std::find_if(CWorldData::Data().begin(), CWorldData::Data().end(), [WorldID](const WorldDataPtr& p){return WorldID == p->GetID(); });
+	if(p != CWorldData::Data().end())
+		return (*p).get();
+	return nullptr;
 }
 
 /* #########################################################################
@@ -341,7 +351,7 @@ void CGS::SendChat(int ChatterClientID, int Mode, const char *pText)
 // Fake chat player in game
 void CGS::FakeChat(const char *pName, const char *pText)
 {
-	const int FakeClientID = CreateBot(BotsTypes::TYPE_BOT_FAKE, 1, 1);
+	const int FakeClientID = CreateBot(TYPE_BOT_FAKE, 1, 1);
 	if(FakeClientID < 0 || FakeClientID > MAX_CLIENTS || !m_apPlayers[FakeClientID])
 		return;
 
@@ -722,7 +732,6 @@ void CGS::OnInit(int WorldID)
 	m_World.SetGameServer(this);
 	m_Events.SetGameServer(this);
 	m_WorldID = WorldID;
-	m_RespawnWorldID = -1;
 
 	for(int i = 0; i < NUM_NETOBJTYPES; i++)
 		Server()->SnapSetStaticsize(i, m_NetObjHandler.GetObjSize(i));
@@ -734,9 +743,7 @@ void CGS::OnInit(int WorldID)
 	m_pMmoController = new MmoController(this);
 	m_pMmoController->LoadLogicWorld();
 
-	// order dependent
-	InitZoneDungeon();
-	InitZonePVP();
+	InitZones();
 
 	if(IsDungeon()) // dungeon game controller
 	{
@@ -813,9 +820,9 @@ void CGS::OnTickMainWorld()
 	if(m_DayEnumType != Server()->GetEnumTypeDay())
 	{
 		m_DayEnumType = Server()->GetEnumTypeDay();
-		if(m_DayEnumType == DayType::NIGHT_TYPE)
+		if(m_DayEnumType == NIGHT_TYPE)
 			m_MultiplierExp = 100 + random_int() % 200;
-		else if(m_DayEnumType == DayType::MORNING_TYPE)
+		else if(m_DayEnumType == MORNING_TYPE)
 			m_MultiplierExp = 100;
 
 		SendDayInfo(-1);
@@ -872,7 +879,7 @@ void CGS::OnMessage(int MsgID, CUnpacker *pUnpacker, int ClientID)
 	{
 		if(MsgID == NETMSGTYPE_CL_SAY)
 		{
-			if(g_Config.m_SvSpamprotection && pPlayer->m_aPlayerTick[TickState::LastChat] && pPlayer->m_aPlayerTick[TickState::LastChat]+Server()->TickSpeed() > Server()->Tick())
+			if(g_Config.m_SvSpamprotection && pPlayer->m_aPlayerTick[LastChat] && pPlayer->m_aPlayerTick[LastChat]+Server()->TickSpeed() > Server()->Tick())
 				return;
 
 			CNetMsg_Cl_Say* pMsg = (CNetMsg_Cl_Say*)pRawMsg;
@@ -909,7 +916,7 @@ void CGS::OnMessage(int MsgID, CUnpacker *pUnpacker, int ClientID)
 			if(pEnd != nullptr)
 				*(const_cast<char *>(pEnd)) = 0;
 
-			pPlayer->m_aPlayerTick[TickState::LastChat] = Server()->Tick();
+			pPlayer->m_aPlayerTick[LastChat] = Server()->Tick();
 
 			if(pMsg->m_pMessage[0] == '/')
 			{
@@ -922,12 +929,12 @@ void CGS::OnMessage(int MsgID, CUnpacker *pUnpacker, int ClientID)
 		else if(MsgID == NETMSGTYPE_CL_CALLVOTE)
 		{
 			CNetMsg_Cl_CallVote *pMsg = (CNetMsg_Cl_CallVote *)pRawMsg;
-			if (str_comp_nocase(pMsg->m_pType, "option") != 0 || Server()->Tick() < (pPlayer->m_aPlayerTick[TickState::LastVoteTry] + (Server()->TickSpeed() / 2)))
+			if (str_comp_nocase(pMsg->m_pType, "option") != 0 || Server()->Tick() < (pPlayer->m_aPlayerTick[LastVoteTry] + (Server()->TickSpeed() / 2)))
 				return;
 
 			if(m_mtxUniqueVotes.try_lock())
 			{
-				pPlayer->m_aPlayerTick[TickState::LastVoteTry] = Server()->Tick();
+				pPlayer->m_aPlayerTick[LastVoteTry] = Server()->Tick();
 				const auto& iter = std::find_if(m_aPlayerVotes[ClientID]->begin(), m_aPlayerVotes[ClientID]->end(), [pMsg](const CVoteOptions& vote)
 				{
 					return (str_comp_nocase(pMsg->m_pValue, vote.m_aDescription) == 0);
@@ -971,15 +978,15 @@ void CGS::OnMessage(int MsgID, CUnpacker *pUnpacker, int ClientID)
 
 		else if(MsgID == NETMSGTYPE_CL_CHANGEINFO)
 		{
-			if(g_Config.m_SvSpamprotection && pPlayer->m_aPlayerTick[TickState::LastChangeInfo] 
-				&& pPlayer->m_aPlayerTick[TickState::LastChangeInfo] + Server()->TickSpeed() * g_Config.m_SvInfoChangeDelay > Server()->Tick())
+			if(g_Config.m_SvSpamprotection && pPlayer->m_aPlayerTick[LastChangeInfo] 
+				&& pPlayer->m_aPlayerTick[LastChangeInfo] + Server()->TickSpeed() * g_Config.m_SvInfoChangeDelay > Server()->Tick())
 				return;
 
 			CNetMsg_Cl_ChangeInfo* pMsg = (CNetMsg_Cl_ChangeInfo*)pRawMsg;
 			if(!str_utf8_check(pMsg->m_pClan) || !str_utf8_check(pMsg->m_pSkin))
 				return;
 
-			pPlayer->m_aPlayerTick[TickState::LastChangeInfo] = Server()->Tick();
+			pPlayer->m_aPlayerTick[LastChangeInfo] = Server()->Tick();
 
 			// set infos
 			if(pPlayer->IsAuthed())
@@ -1011,16 +1018,16 @@ void CGS::OnMessage(int MsgID, CUnpacker *pUnpacker, int ClientID)
 		{
 			CNetMsg_Cl_Emoticon *pMsg = (CNetMsg_Cl_Emoticon *)pRawMsg;
 
-			if(g_Config.m_SvSpamprotection && pPlayer->m_aPlayerTick[TickState::LastEmote] && pPlayer->m_aPlayerTick[TickState::LastEmote]+(Server()->TickSpeed() / 2) > Server()->Tick())
+			if(g_Config.m_SvSpamprotection && pPlayer->m_aPlayerTick[LastEmote] && pPlayer->m_aPlayerTick[LastEmote]+(Server()->TickSpeed() / 2) > Server()->Tick())
 				return;
 
-			pPlayer->m_aPlayerTick[TickState::LastEmote] = Server()->Tick();
+			pPlayer->m_aPlayerTick[LastEmote] = Server()->Tick();
 			SendEmoticon(ClientID, pMsg->m_Emoticon, true);
 		}
 
 		else if (MsgID == NETMSGTYPE_CL_KILL)
 		{
-			if(pPlayer->m_aPlayerTick[TickState::LastKill] && pPlayer->m_aPlayerTick[TickState::LastKill]+Server()->TickSpeed()*3 > Server()->Tick())
+			if(pPlayer->m_aPlayerTick[LastKill] && pPlayer->m_aPlayerTick[LastKill]+Server()->TickSpeed()*3 > Server()->Tick())
 				return;
 
 			Broadcast(ClientID, BroadcastPriority::MAIN_INFORMATION, 100, "Self kill is not allowed.");
@@ -1096,10 +1103,10 @@ void CGS::OnMessage(int MsgID, CUnpacker *pUnpacker, int ClientID)
 	{
 		if (MsgID == NETMSGTYPE_CL_STARTINFO)
 		{
-			if(!pPlayer || pPlayer->m_aPlayerTick[TickState::LastChangeInfo] != 0)
+			if(!pPlayer || pPlayer->m_aPlayerTick[LastChangeInfo] != 0)
 				return;
 
-			pPlayer->m_aPlayerTick[TickState::LastChangeInfo] = Server()->Tick();
+			pPlayer->m_aPlayerTick[LastChangeInfo] = Server()->Tick();
 
 			// set start infos
 			if(!pPlayer->IsAuthed())
@@ -1177,7 +1184,7 @@ void CGS::OnClientEnter(int ClientID)
 	}
 
 	Mmo()->Account()->LoadAccount(pPlayer, false);
-	Mmo()->SaveAccount(m_apPlayers[ClientID], SaveType::SAVE_POSITION);
+	Mmo()->SaveAccount(m_apPlayers[ClientID], SAVE_POSITION);
 }
 
 void CGS::OnClientDrop(int ClientID, const char *pReason)
@@ -1196,7 +1203,7 @@ void CGS::OnClientDrop(int ClientID, const char *pReason)
 
 		Chat(-1, "{STR} has left the MRPG", Server()->ClientName(ClientID));
 		ChatDiscord(DC_JOIN_LEAVE, Server()->ClientName(ClientID), "leave game MRPG");
-		Mmo()->SaveAccount(m_apPlayers[ClientID], SaveType::SAVE_POSITION);
+		Mmo()->SaveAccount(m_apPlayers[ClientID], SAVE_POSITION);
 	}
 
 	delete m_apPlayers[ClientID];
@@ -1234,7 +1241,7 @@ void CGS::PrepareClientChangeWorld(int ClientID)
 
 bool CGS::IsClientReady(int ClientID) const
 {
-	return m_apPlayers[ClientID] && m_apPlayers[ClientID]->m_aPlayerTick[TickState::LastChangeInfo] > 0;
+	return m_apPlayers[ClientID] && m_apPlayers[ClientID]->m_aPlayerTick[LastChangeInfo] > 0;
 }
 
 bool CGS::IsClientPlayer(int ClientID) const
@@ -1276,7 +1283,7 @@ void CGS::ConSetWorldTime(IConsole::IResult* pResult, void* pUserData)
 {
 	const int Hour = pResult->GetInteger(0);
 	IServer* pServer = (IServer*)pUserData;
-	pServer->SetOffsetGameTime(Hour);
+	pServer->SetOffsetWorldTime(Hour);
 }
 
 // give the item to the player
@@ -1641,20 +1648,20 @@ void CGS::ShowVotesPlayerStats(CPlayer *pPlayer)
 {
 	const int ClientID = pPlayer->GetCID();
 	AVH(ClientID, TAB_INFO_STAT, "Player Stats {STR}", IsDungeon() ? "(Sync)" : "\0");
-	for(const auto& [ID, Attribute] : CAttributeDescription::Data())
+	for(const auto& [ID, pAttribute] : CAttributeDescription::Data())
 	{
-		if(!Attribute.HasField())
+		if(!pAttribute->HasField())
 			continue;
 
 		// if upgrades are cheap, they have a division of statistics
 		const int Size = pPlayer->GetAttributeSize(ID);
-		if(Attribute.GetDividing() <= 1)
+		if(pAttribute->GetDividing() <= 1)
 		{
 			const int WorkedSize = pPlayer->GetAttributeSize(ID, true);
-			AVM(ClientID, "null", NOPE, TAB_INFO_STAT, "{INT} (+{INT}) - {STR}", Size, WorkedSize, Attribute.GetName());
+			AVM(ClientID, "null", NOPE, TAB_INFO_STAT, "{INT} (+{INT}) - {STR}", Size, WorkedSize, pAttribute->GetName());
 			continue;
 		}
-		AVM(ClientID, "null", NOPE, TAB_INFO_STAT, "+{INT} - {STR}", Size, Attribute.GetName());
+		AVM(ClientID, "null", NOPE, TAB_INFO_STAT, "+{INT} - {STR}", Size, pAttribute->GetName());
 	}
 
 	AVM(ClientID, "null", NOPE, NOPE, "Player Upgrade Point: {INT}P", pPlayer->Acc().m_Upgrade);
@@ -1692,20 +1699,20 @@ bool CGS::ParsingVoteCommands(int ClientID, const char *CMD, const int VoteID, c
 	if (PPSTR(CMD, "SORTEDTOP") == 0)
 	{
 		pPlayer->m_aSortTabs[SORT_TOP] = VoteID;
-		StrongUpdateVotes(ClientID, MenuList::MENU_TOP_LIST);
+		StrongUpdateVotes(ClientID, MENU_TOP_LIST);
 		return true;
 	}
 	if (PPSTR(CMD, "SORTEDWIKIWORLD") == 0)
 	{
 		pPlayer->m_aSortTabs[SORT_GUIDE_WORLD] = VoteID;
-		StrongUpdateVotes(ClientID, MenuList::MENU_GUIDE_GRINDING);
+		StrongUpdateVotes(ClientID, MENU_GUIDE_GRINDING);
 		return true;
 	}
 	if(pPlayer->ParseVoteUpgrades(CMD, VoteID, VoteID2, Get))
 		return true;
 
 	// parsing everything else
-	const sqlstr::CSqlString<64> FormatText = sqlstr::CSqlString<64>(Text);
+	const CSqlString<64> FormatText = sqlstr::CSqlString<64>(Text);
 	return Mmo()->OnParsingVoteCommands(pPlayer, CMD, VoteID, VoteID2, Get, FormatText.cstr());
 }
 
@@ -1807,11 +1814,11 @@ void CGS::SendDayInfo(int ClientID)
 		Chat(-1, "{STR} came! Good {STR}!", Server()->GetStringTypeDay(), Server()->GetStringTypeDay());
 	}
 
-	if(m_DayEnumType == DayType::NIGHT_TYPE)
+	if(m_DayEnumType == NIGHT_TYPE)
 	{
 		Chat(ClientID, "Nighttime experience was increase to {INT}%", m_MultiplierExp);
 	}
-	else if(m_DayEnumType == DayType::MORNING_TYPE)
+	else if(m_DayEnumType == MORNING_TYPE)
 	{
 		Chat(ClientID, "Daytime experience was downgraded to 100%");
 	}
@@ -1824,39 +1831,30 @@ int CGS::GetExperienceMultiplier(int Experience) const
 	return translate_to_percent_rest(Experience, m_MultiplierExp);
 }
 
-void CGS::InitZonePVP()
+void CGS::InitZones()
 {
-	// disallow pvp for dungeon zone
-	if(IsDungeon())
-	{
-		m_AllowedPVP = false;
-		return;
-	}
+	m_DungeonID = 0;
+	m_AllowedPVP = false;
+	m_RespawnWorldID = GetWorldData()->GetRespawnWorld()->GetID();
 
 	// with mobs allow pvp zone
 	for(int i = MAX_PLAYERS; i < MAX_CLIENTS; i++)
 	{
-		if(m_apPlayers[i] && m_apPlayers[i]->GetBotType() == BotsTypes::TYPE_BOT_MOB && m_apPlayers[i]->GetPlayerWorldID() == m_WorldID)
+		if(m_apPlayers[i] && m_apPlayers[i]->GetBotType() == TYPE_BOT_MOB && m_apPlayers[i]->GetPlayerWorldID() == m_WorldID)
 		{
 			m_AllowedPVP = true;
-			return;
+			break;
 		}
 	}
 
-	// default antipvp
-	m_AllowedPVP = false;
-}
-
-void CGS::InitZoneDungeon()
-{
-	m_DungeonID = 0;
-
+	// init dungeon zone
 	for(const auto& [ID, Dungeon] : CDungeonData::ms_aDungeon)
 	{
 		if(m_WorldID == Dungeon.m_WorldID)
 		{
 			m_DungeonID = ID;
-			return;
+			m_AllowedPVP = false;
+			break;
 		}
 	}
 }

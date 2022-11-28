@@ -25,8 +25,8 @@ CPlayer::CPlayer(CGS *pGS, int ClientID) : m_pGS(pGS), m_ClientID(ClientID)
 	m_EidolonCID = -1;
 	m_Spawned = true;
 	m_SnapHealthTick = 0;
-	m_aPlayerTick[TickState::Respawn] = Server()->Tick() + Server()->TickSpeed();
-	m_aPlayerTick[TickState::Die] = Server()->Tick();
+	m_aPlayerTick[Respawn] = Server()->Tick() + Server()->TickSpeed();
+	m_aPlayerTick[Die] = Server()->Tick();
 	m_PrevTuningParams = *pGS->Tuning();
 	m_NextTuningParams = m_PrevTuningParams;
 
@@ -38,7 +38,7 @@ CPlayer::CPlayer(CGS *pGS, int ClientID) : m_pGS(pGS), m_ClientID(ClientID)
 		pIdMap[0] = m_ClientID;
 
 		m_LastVoteMenu = NOPE;
-		m_OpenVoteMenu = MenuList::MENU_MAIN;
+		m_OpenVoteMenu = MENU_MAIN;
 		m_MoodState = Mood::NORMAL;
 		Acc().m_Team = GetStartTeam();
 		GS()->SendTuningParams(ClientID);
@@ -96,7 +96,7 @@ void CPlayer::Tick()
 			m_pCharacter = nullptr;
 		}
 	}
-	else if (m_Spawned && m_aPlayerTick[TickState::Respawn] + Server()->TickSpeed() * 3 <= Server()->Tick())
+	else if (m_Spawned && m_aPlayerTick[Respawn] + Server()->TickSpeed() * 3 <= Server()->Tick())
 	{
 		TryRespawn();
 	}
@@ -129,9 +129,9 @@ void CPlayer::TryCreateEidolon()
 
 	mtxThreadPathWritedNow.lock();
 
-	if(int EidolonItemID = GetEquippedItemID(EQUIP_EIDOLON); EidolonItemID > 0 && EidolonsVar::getEidolonBot(EidolonItemID) > 0)
+	if(int EidolonItemID = GetEquippedItemID(EQUIP_EIDOLON); EidolonItemID > 0 && EidolonsTools::getEidolonBot(EidolonItemID) > 0)
 	{
-		const int EidolonCID = GS()->CreateBot(BotsTypes::TYPE_BOT_EIDOLON, EidolonsVar::getEidolonBot(EidolonItemID), m_ClientID);
+		const int EidolonCID = GS()->CreateBot(TYPE_BOT_EIDOLON, EidolonsTools::getEidolonBot(EidolonItemID), m_ClientID);
 		m_EidolonCID = EidolonCID;
 	}
 
@@ -488,15 +488,15 @@ void CPlayer::AddExp(int Exp)
 		GS()->Chat(m_ClientID, "Congratulations. Level UP. Now Level {INT}!", Acc().m_Level);
 		if(Acc().m_Exp < ExpNeed(Acc().m_Level))
 		{
-			GS()->StrongUpdateVotes(m_ClientID, MenuList::MENU_MAIN);
-			GS()->Mmo()->SaveAccount(this, SaveType::SAVE_STATS);
-			GS()->Mmo()->SaveAccount(this, SaveType::SAVE_UPGRADES);
+			GS()->StrongUpdateVotes(m_ClientID, MENU_MAIN);
+			GS()->Mmo()->SaveAccount(this, SAVE_STATS);
+			GS()->Mmo()->SaveAccount(this, SAVE_UPGRADES);
 		}
 	}
 	ProgressBar("Account", Acc().m_Level, Acc().m_Exp, ExpNeed(Acc().m_Level), Exp);
 
 	if (rand() % 5 == 0)
-		GS()->Mmo()->SaveAccount(this, SaveType::SAVE_STATS);
+		GS()->Mmo()->SaveAccount(this, SAVE_STATS);
 
 	if (Acc().IsGuild())
 		GS()->Mmo()->Member()->AddExperience(Acc().m_GuildID);
@@ -557,8 +557,15 @@ void CPlayer::FormatBroadcastBasicStats(char *pBuffer, int Size, const char* pAp
 	const int Mana = m_pCharacter->Mana();
 	const int Gold = GetItem(itGold)->GetValue();
 
-	str_format(pBuffer, Size, "\n\n\n\n\nLv%d%s\nHP %d/%d\nMP %d/%d\nGold %d\n\n\n\n\n\n\n\n\n\n\n\n%s", 
-		Acc().m_Level, Level.get(), Health, MaximumHealth, Mana, MaximumMana, Gold, pAppendStr);
+	char aRecastInfo[32]{};
+	if(m_aPlayerTick[PotionRecast] > Server()->Tick())
+	{
+		int Seconds = max(0, (m_aPlayerTick[PotionRecast] - Server()->Tick()) / Server()->TickSpeed());
+		str_format(aRecastInfo, sizeof(aRecastInfo), "Potion recast: %d", Seconds);
+	}
+
+	str_format(pBuffer, Size, "\n\n\n\n\nLv%d%s\nHP %d/%d\nMP %d/%d\nGold %d\n%s\n\n\n\n\n\n\n\n\n\n\n%s", 
+		Acc().m_Level, Level.get(), Health, MaximumHealth, Mana, MaximumMana, Gold, aRecastInfo, pAppendStr);
 	for(int space = 150, c = str_length(pBuffer); c < Size && space; c++, space--)
 		pBuffer[c] = ' ';
 }
@@ -611,10 +618,10 @@ bool CPlayer::ParseItemsF3F4(int Vote)
 		// conversations
 		if(GetTalkedID() > 0)
 		{
-			if(m_aPlayerTick[TickState::LastDialog] && m_aPlayerTick[TickState::LastDialog] > GS()->Server()->Tick())
+			if(m_aPlayerTick[LastDialog] && m_aPlayerTick[LastDialog] > GS()->Server()->Tick())
 				return true;
 
-			m_aPlayerTick[TickState::LastDialog] = GS()->Server()->Tick() + (GS()->Server()->TickSpeed() / 4);
+			m_aPlayerTick[LastDialog] = GS()->Server()->Tick() + (GS()->Server()->TickSpeed() / 4);
 			GS()->CreatePlayerSound(m_ClientID, SOUND_PICKUP_ARMOR);
 			SetTalking(GetTalkedID(), false);
 			return true;
@@ -629,8 +636,8 @@ bool CPlayer::ParseVoteUpgrades(const char *CMD, const int VoteID, const int Vot
 	{
 		if(Upgrade(Get, &Acc().m_aStats[(AttributeIdentifier)VoteID], &Acc().m_Upgrade, VoteID2, 1000))
 		{
-			GS()->Mmo()->SaveAccount(this, SaveType::SAVE_UPGRADES);
-			GS()->UpdateVotes(m_ClientID, MenuList::MENU_UPGRADES);
+			GS()->Mmo()->SaveAccount(this, SAVE_UPGRADES);
+			GS()->UpdateVotes(m_ClientID, MENU_UPGRADES);
 		}
 		return true;
 	}
@@ -714,9 +721,16 @@ int CPlayer::GetEquippedItemID(ItemFunctional EquipID, int SkipItemID) const
 
 int CPlayer::GetAttributeSize(AttributeIdentifier ID, bool WorkedSize)
 {
-	int Size = 0;
+	// if the best tank class is selected among the players we return the sync dungeon stats
+	const CAttributeDescription* pAtt = GS()->GetAttributeInfo(ID);
+	if(GS()->IsDungeon() && pAtt->GetUpgradePrice() < 10 && CDungeonData::ms_aDungeon[GS()->GetDungeonID()].IsDungeonPlaying())
+	{
+		const CGameControllerDungeon* pDungeon = dynamic_cast<CGameControllerDungeon*>(GS()->m_pController);
+		return pDungeon->GetAttributeDungeonSync(this, ID);
+	}
 
 	// get all attributes from items
+	int Size = 0;
 	for(const auto& [ItemID, ItemData] : CPlayerItem::Data()[m_ClientID])
 	{
 		if(ItemData.IsEquipped() && ItemData.Info()->IsEnchantable() && ItemData.Info()->GetInfoEnchantStats(ID))
@@ -724,7 +738,6 @@ int CPlayer::GetAttributeSize(AttributeIdentifier ID, bool WorkedSize)
 	}
 
 	// if the attribute has the value of player upgrades we sum up
-	const CAttributeDescription* pAtt = GS()->GetAttributeInfo(ID);
 	if (pAtt->HasField())
 		Size += Acc().m_aStats[ID];
 
@@ -732,21 +745,15 @@ int CPlayer::GetAttributeSize(AttributeIdentifier ID, bool WorkedSize)
 	if (WorkedSize && pAtt->GetDividing() > 0)
 		Size /= pAtt->GetDividing();
 
-	// if the best tank class is selected among the players we return the sync dungeon stats
-	if(GS()->IsDungeon() && pAtt->GetUpgradePrice() < 10 && CDungeonData::ms_aDungeon[GS()->GetDungeonID()].IsDungeonPlaying())
-	{
-		const CGameControllerDungeon* pDungeon = dynamic_cast<CGameControllerDungeon*>(GS()->m_pController);
-		return pDungeon->GetAttributeDungeonSync(this, ID);
-	}
 	return Size;
 }
 
 int CPlayer::GetTypeAttributesSize(AttributeType Type)
 {
 	int Size = 0;
-	for (const auto& [ID, Attribute] : CAttributeDescription::Data())
+	for (const auto& [ID, pAttribute] : CAttributeDescription::Data())
 	{
-		if (Attribute.IsType(Type))
+		if (pAttribute->IsType(Type))
 			Size += GetAttributeSize(ID, true);
 	}
 	return Size;
@@ -781,7 +788,7 @@ void CPlayer::SetTalking(int TalkedID, bool IsStartDialogue)
 
 	CPlayerBot* pBotPlayer = static_cast<CPlayerBot*>(GS()->m_apPlayers[TalkedID]);
 	const int MobID = pBotPlayer->GetBotMobID();
-	if (pBotPlayer->GetBotType() == BotsTypes::TYPE_BOT_NPC)
+	if (pBotPlayer->GetBotType() == TYPE_BOT_NPC)
 	{
 		// clearing the end of dialogs or a dialog that was meaningless
 		const int sizeTalking = NpcBotInfo::ms_aNpcBot[MobID].m_aDialogs.size();
@@ -794,7 +801,7 @@ void CPlayer::SetTalking(int TalkedID, bool IsStartDialogue)
 
 		// you get to know in general if the quest is to give out a random senseless dialog
 		int GivingQuestID = GS()->Mmo()->BotsData()->GetQuestNPC(MobID);
-		if (isTalkingEmpty || GetQuest(GivingQuestID).GetState() >= QuestState::QUEST_ACCEPT)
+		if (isTalkingEmpty || GetQuest(GivingQuestID).GetState() >= QuestState::ACCEPT)
 		{
 			const char* pMeaninglessDialog = GS()->Mmo()->BotsData()->GetMeaninglessDialog();
 			GS()->Mmo()->BotsData()->DialogBotStepNPC(this, MobID, -1, pMeaninglessDialog);
@@ -821,7 +828,7 @@ void CPlayer::SetTalking(int TalkedID, bool IsStartDialogue)
 		GS()->Mmo()->BotsData()->DialogBotStepNPC(this, MobID, m_DialogNPC.m_Progress);
 	}
 
-	else if (pBotPlayer->GetBotType() == BotsTypes::TYPE_BOT_QUEST)
+	else if (pBotPlayer->GetBotType() == TYPE_BOT_QUEST)
 	{
 		const int SizeDialogs = QuestBotInfo::ms_aQuestBot[MobID].m_aDialogs.size();
 		if(m_DialogNPC.m_Progress >= SizeDialogs)
@@ -829,23 +836,6 @@ void CPlayer::SetTalking(int TalkedID, bool IsStartDialogue)
 			ClearTalking();
 			return;
 		}
-
-		// function parse json event data
-		auto ParseEvent = [](std::string &EventData, const std::function<void(nlohmann::json& pJson)>& pFunc)
-		{
-			try
-			{
-				if(!EventData.empty())
-				{
-					nlohmann::json JsonData = nlohmann::json::parse(EventData);
-					pFunc(JsonData);
-				}
-			}
-			catch(nlohmann::json::exception& s)
-			{
-				dbg_msg("dialog error", "%s", s.what());
-			}
-		};
 
 		//  after
 		if(m_DialogNPC.m_FreezedProgress)
@@ -864,7 +854,7 @@ void CPlayer::SetTalking(int TalkedID, bool IsStartDialogue)
 				GS()->Mmo()->Quest()->InteractiveQuestNPC(this, QuestBotInfo::ms_aQuestBot[MobID], true);
 				ClearTalking();
 
-				ParseEvent(QuestBotInfo::ms_aQuestBot[MobID].m_EventJsonData, [this](nlohmann::json& pJson)
+				JsonTools::parseFromString(QuestBotInfo::ms_aQuestBot[MobID].m_EventJsonData, [this](nlohmann::json& pJson)
 				{
 					/* * * * * * * * *
 					 * Teleport event
@@ -900,7 +890,7 @@ void CPlayer::SetTalking(int TalkedID, bool IsStartDialogue)
 			m_DialogNPC.m_RequestProgress = m_DialogNPC.m_Progress;
 			m_DialogNPC.m_FreezedProgress = true;
 
-			ParseEvent(QuestBotInfo::ms_aQuestBot[MobID].m_EventJsonData, [this](nlohmann::json& pJson)
+			JsonTools::parseFromString(QuestBotInfo::ms_aQuestBot[MobID].m_EventJsonData, [this](nlohmann::json& pJson)
 			{
 				/* * * * * * * *
 				 * Chat event
@@ -1018,6 +1008,7 @@ void CPlayer::FormatDialogText(int DataBotID, const char *pText) // TODO: perfor
 	str_replace(m_aFormatDialogText, "<talked>", DataBotInfo::ms_aDataBot[DataBotID].m_aNameBot);
 	str_replace(m_aFormatDialogText, "<time> ", GS()->Server()->GetStringTypeDay());
 	str_replace(m_aFormatDialogText, "<here>", GS()->Server()->GetWorldName(GS()->GetWorldID()));
+	str_replace(m_aFormatDialogText, "<eidolon>", GetEidolon() ? DataBotInfo::ms_aDataBot[GetEidolon()->GetBotID()].m_aNameBot : "Eidolon");
 }
 
 void CPlayer::ClearDialogText()

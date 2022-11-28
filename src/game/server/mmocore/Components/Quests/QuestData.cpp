@@ -2,11 +2,10 @@
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
 #include "QuestCore.h"
 
-#include <engine/shared/config.h>
 #include <game/server/gamecontext.h>
 
 #include <game/server/mmocore/Components/Dungeons/DungeonCore.h>
-#include <game/server/mmocore/Components/Worlds/WorldSwapCore.h>
+#include <game/server/mmocore/Components/Worlds/WorldCore.h>
 
 CQuestDataInfo& CQuestData::Info() const { return CQuestDataInfo::ms_aDataQuests[m_QuestID]; }
 std::string CQuestData::GetJsonFileName() const { return Info().GetJsonFileName(m_pPlayer->Acc().m_UserID); }
@@ -14,7 +13,7 @@ std::string CQuestData::GetJsonFileName() const { return Info().GetJsonFileName(
 std::map < int, std::map <int, CQuestData > > CQuestData::ms_aPlayerQuests;
 void CQuestData::InitSteps()
 {
-	if(m_State != QuestState::QUEST_ACCEPT || !m_pPlayer)
+	if(m_State != QuestState::ACCEPT || !m_pPlayer)
 		return;
 
 	// checking dir
@@ -59,7 +58,7 @@ void CQuestData::InitSteps()
 
 void CQuestData::LoadSteps()
 {
-	if(m_State != QuestState::QUEST_ACCEPT || !m_pPlayer)
+	if(m_State != QuestState::ACCEPT || !m_pPlayer)
 		return;
 
 	// loading file is not open pereinitilized steps
@@ -98,7 +97,7 @@ void CQuestData::LoadSteps()
 
 void CQuestData::SaveSteps()
 {
-	if(m_State != QuestState::QUEST_ACCEPT)
+	if(m_State != QuestState::ACCEPT)
 		return;
 
 	// set json structure
@@ -139,15 +138,15 @@ void CQuestData::ClearSteps()
 
 bool CQuestData::Accept()
 {
-	if(m_State != QuestState::QUEST_NO_ACCEPT)
+	if(m_State != QuestState::NO_ACCEPT)
 		return false;
 
 	int ClientID = m_pPlayer->GetCID();
 	CGS* pGS = (CGS*)Instance::GetServer()->GameServerPlayer(ClientID);
 
 	// init quest
-	m_State = QuestState::QUEST_ACCEPT;
-	Database->Execute<DB::INSERT>("tw_accounts_quests", "(QuestID, UserID, Type) VALUES ('%d', '%d', '%d')", m_QuestID, m_pPlayer->Acc().m_UserID, QuestState::QUEST_ACCEPT);
+	m_State = QuestState::ACCEPT;
+	Database->Execute<DB::INSERT>("tw_accounts_quests", "(QuestID, UserID, Type) VALUES ('%d', '%d', '%d')", m_QuestID, m_pPlayer->Acc().m_UserID, m_State);
 
 	// init steps
 	InitSteps();
@@ -155,22 +154,23 @@ bool CQuestData::Accept()
 	// information
 	const int QuestsSize = Info().GetQuestStorySize();
 	const int QuestPosition = Info().GetQuestStoryPosition();
-	pGS->Chat(ClientID, "Accepted ({STR} - {STR} {INT}/{INT})!", Info().GetStory(), Info().GetName(), QuestPosition, QuestsSize);
-	pGS->Chat(ClientID, "# Reward (Gold {VAL}, Experience {INT})!", Info().m_Gold, Info().m_Exp);
+	pGS->Chat(ClientID, "------ Quest story [{STR}] ({INT}/{INT}) ------", Info().GetStory(), QuestPosition, QuestsSize);
+	pGS->Chat(ClientID, "Name: \"{STR}\"", Info().GetName());
+	pGS->Chat(ClientID, "Reward: \"Gold {VAL}, Experience {INT}\".", Info().m_Gold, Info().m_Exp);
 	pGS->CreatePlayerSound(ClientID, SOUND_CTF_CAPTURE);
 	return true;
 }
 
 void CQuestData::Finish()
 {
-	if(m_State != QuestState::QUEST_ACCEPT)
+	if(m_State != QuestState::ACCEPT)
 		return;
 
 	int ClientID = m_pPlayer->GetCID();
 	CGS* pGS = (CGS*)Instance::GetServer()->GameServerPlayer(ClientID);
 
 	// finish quest
-	m_State = QuestState::QUEST_FINISHED;
+	m_State = QuestState::FINISHED;
 	Database->Execute<DB::UPDATE>("tw_accounts_quests", "Type = '%d' WHERE QuestID = '%d' AND UserID = '%d'", m_State, m_QuestID, m_pPlayer->Acc().m_UserID);
 
 	// clear steps
@@ -179,7 +179,7 @@ void CQuestData::Finish()
 	// awards and write about completion
 	m_pPlayer->AddMoney(Info().m_Gold);
 	m_pPlayer->AddExp(Info().m_Exp);
-	pGS->Chat(-1, "{STR} completed ({STR} - {STR})!", pGS->Server()->ClientName(ClientID), Info().m_aStoryLine, Info().m_aName);
+	pGS->Chat(-1, "{STR} completed the \"{STR} - {STR}\".", pGS->Server()->ClientName(ClientID), Info().m_aStoryLine, Info().m_aName);
 	pGS->ChatDiscord(DC_SERVER_INFO, pGS->Server()->ClientName(ClientID), "Completed ({STR} - {STR})", Info().m_aStoryLine, Info().m_aName);
 
 	// check whether the after quest has opened something new
@@ -187,20 +187,16 @@ void CQuestData::Finish()
 	pGS->Mmo()->Dungeon()->CheckQuestingOpened(m_pPlayer, m_QuestID);
 
 	// save player stats and accept next story quest
-	pGS->Mmo()->SaveAccount(m_pPlayer, SaveType::SAVE_STATS);
+	pGS->Mmo()->SaveAccount(m_pPlayer, SAVE_STATS);
 	pGS->Mmo()->Quest()->AcceptNextStoryQuestStep(m_pPlayer, m_QuestID);
 	pGS->CreateText(nullptr, false, vec2(m_pPlayer->m_ViewPos.x, m_pPlayer->m_ViewPos.y - 70), vec2(0, -0.5), 30, "COMPLECTED");
 }
 
-void CQuestData::CheckaAvailableNewStep()
+void CQuestData::CheckAvailableNewStep()
 {
 	// check whether the active steps is complete
-	auto pActiveStep = std::find_if(m_StepsQuestBot.begin(), m_StepsQuestBot.end(), [this](std::pair <const int, CPlayerQuestStepDataInfo> &pItem)
-	{
-		return (pItem.second.m_Bot.m_Step == m_Step && !pItem.second.m_StepComplete && pItem.second.m_Bot.m_HasAction);
-	});
-
-	if(pActiveStep != m_StepsQuestBot.end())
+	if(std::find_if(m_StepsQuestBot.begin(), m_StepsQuestBot.end(), [this](std::pair <const int, CPlayerQuestStepDataInfo> &p)
+	{ return (p.second.m_Bot.m_Step == m_Step && !p.second.m_StepComplete && p.second.m_Bot.m_HasAction); }) != m_StepsQuestBot.end())
 		return;
 
 	// update steps
@@ -226,7 +222,7 @@ void CQuestData::CheckaAvailableNewStep()
 		int ClientID = m_pPlayer->GetCID();
 		CGS* pGS = (CGS*)Instance::GetServer()->GameServerPlayer(ClientID);
 
-		pGS->StrongUpdateVotes(ClientID, MenuList::MENU_JOURNAL_MAIN);
-		pGS->StrongUpdateVotes(ClientID, MenuList::MENU_MAIN);
+		pGS->StrongUpdateVotes(ClientID, MENU_JOURNAL_MAIN);
+		pGS->StrongUpdateVotes(ClientID, MENU_MAIN);
 	}
 }

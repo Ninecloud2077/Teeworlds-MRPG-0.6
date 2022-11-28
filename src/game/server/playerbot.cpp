@@ -6,6 +6,7 @@
 #include "mmocore/PathFinder.h"
 
 #include "entities/botai/character_bot_ai.h"
+#include "gamemodes/dungeon.h"
 
 #include "mmocore/Components/Bots/BotCore.h"
 
@@ -15,6 +16,7 @@ CPlayerBot::CPlayerBot(CGS *pGS, int ClientID, int BotID, int SubBotID, int Spaw
 	: CPlayer(pGS, ClientID), m_BotType(SpawnPoint), m_BotID(BotID), m_MobID(SubBotID), m_BotHealth(0), m_LastPosTick(0), m_PathSize(0)
 {
 	m_EidolonCID = -1;
+	m_OldTargetPos = vec2(0, 0);
 	m_DungeonAllowedSpawn = false;
 	m_BotStartHealth = m_BotType == TYPE_BOT_MOB ? CPlayerBot::GetAttributeSize(AttributeIdentifier::Hardness) : 10;
 }
@@ -43,20 +45,16 @@ void CPlayerBot::Tick()
 		m_BotActive = GS()->IsPlayersNearby(m_pCharacter->GetPos(), 1000.0f);
 
 		// update eidolon position
-		if(m_BotType == BotsTypes::TYPE_BOT_EIDOLON)
+		if(m_BotType == TYPE_BOT_EIDOLON)
 		{
 			m_BotActive = m_BotActive && GetEidolonOwner();
 			if(const CPlayer* pOwner = GetEidolonOwner(); pOwner && pOwner->GetCharacter() && !m_BotActive)
 			{
-				vec2 OwnerPos = pOwner->GetCharacter()->m_Core.m_Pos;
-				static constexpr int Directions = 4;
-				static vec2 Positions[Directions] = { vec2(-48.0f, 0.0f), vec2(0.0f, -48.0f), vec2(48.0f, 0.0f), vec2(0.0f, 48.0f) };
-				vec2* Pos = std::find_if(std::begin(Positions), std::end(Positions), [&OwnerPos, this](const vec2& p){ return !GS()->Collision()->CheckPoint(OwnerPos + p); });
-				vec2 NewPos = OwnerPos + (Pos ? *Pos : vec2(0,0));
-
-				m_pCharacter->ResetInput();
+				vec2 OwnerPos = pOwner->GetCharacter()->GetPos();
 				m_pCharacter->m_DoorHit = false;
-				m_pCharacter->ChangePosition(NewPos);
+				m_pCharacter->ChangePosition(OwnerPos);
+				m_pCharacter->m_Core.m_Vel = pOwner->GetCharacter()->m_Core.m_Vel;
+				m_pCharacter->m_Core.m_Direction = pOwner->GetCharacter()->m_Core.m_Direction;
 				m_BotActive = true;
 			}
 		}
@@ -149,12 +147,18 @@ int CPlayerBot::GetAttributeSize(AttributeIdentifier ID, bool WorkedSize)
 			if(pAtt->GetType() == AttributeType::Hardtype)
 				Size /= HardtypeDividing;
 		}
+
 		return Size;
 	};
 
 	int Size = 0;
 	if(m_BotType == TYPE_BOT_EIDOLON)
-		Size = CalculateAttribute(EidolonsVar::getEidolonItemID(m_BotID), 1, 5);
+	{
+		if(GS()->IsDungeon())
+			Size = CalculateAttribute(translate_to_percent_rest(max(1, dynamic_cast<CGameControllerDungeon*>(GS()->m_pController)->GetSyncFactor()), 5), 1, 5);
+		else
+			Size = CalculateAttribute(EidolonsTools::getEidolonItemID(m_BotID), 1, 5);
+	}
 	else if(m_BotType == TYPE_BOT_MOB)
 		Size = CalculateAttribute(MobBotInfo::ms_aMobBot[m_MobID].m_Power, MobBotInfo::ms_aMobBot[m_MobID].m_Spread, MobBotInfo::ms_aMobBot[m_MobID].m_Boss ? 30 : 2);
 	return Size;
@@ -247,7 +251,7 @@ int CPlayerBot::IsVisibleForClient(int ClientID) const
 	if(m_BotType == TYPE_BOT_QUEST)
 	{
 		const int QuestID = QuestBotInfo::ms_aQuestBot[m_MobID].m_QuestID;
-		if(pSnappingPlayer->GetQuest(QuestID).GetState() != QUEST_ACCEPT)
+		if(pSnappingPlayer->GetQuest(QuestID).GetState() != QuestState::ACCEPT)
 			return 0;
 
 		if((QuestBotInfo::ms_aQuestBot[m_MobID].m_Step != pSnappingPlayer->GetQuest(QuestID).m_Step) || pSnappingPlayer->GetQuest(QuestID).m_StepsQuestBot[GetBotMobID()].m_StepComplete)
@@ -366,7 +370,7 @@ bool CPlayerBot::IsActiveQuests(int SnapClientID) const
 	if(m_BotType == TYPE_BOT_NPC)
 	{
 		const int GivesQuest = GS()->Mmo()->BotsData()->GetQuestNPC(m_MobID);
-		if(NpcBotInfo::ms_aNpcBot[m_MobID].m_Function == FUNCTION_NPC_GIVE_QUEST && pSnappingPlayer->GetQuest(GivesQuest).GetState() == QUEST_NO_ACCEPT)
+		if(NpcBotInfo::ms_aNpcBot[m_MobID].m_Function == FUNCTION_NPC_GIVE_QUEST && pSnappingPlayer->GetQuest(GivesQuest).GetState() == QuestState::NO_ACCEPT)
 			return true;
 
 		return false;
@@ -428,6 +432,7 @@ int CPlayerBot::GetPlayerWorldID() const
 
 CTeeInfo& CPlayerBot::GetTeeInfo() const
 {
+	dbg_assert(DataBotInfo::IsDataBotValid(m_BotID), "Assert getter TeeInfo from data bot");
 	return DataBotInfo::ms_aDataBot[m_BotID].m_TeeInfos;
 }
 
@@ -440,6 +445,8 @@ void CPlayerBot::FindThreadPath(CGS* pGameServer, CPlayerBot* pBotPlayer, vec2 S
 
 	while(pBotPlayer->m_ThreadReadNow.load(std::memory_order_acquire))
 		std::this_thread::sleep_for(std::chrono::microseconds(1));
+
+	pBotPlayer->m_OldTargetPos = pBotPlayer->m_TargetPos;
 
 	pGameServer->PathFinder()->Init();
 	pGameServer->PathFinder()->SetStart(StartPos);
@@ -462,6 +469,8 @@ void CPlayerBot::GetThreadRandomRadiusWaypointTarget(CGS* pGameServer, CPlayerBo
 	while(pBotPlayer->m_ThreadReadNow.load(std::memory_order_acquire))
 		std::this_thread::sleep_for(std::chrono::microseconds(1));
 
+	pBotPlayer->m_OldTargetPos = pBotPlayer->m_TargetPos;
+
 	const vec2 TargetPos = pGameServer->PathFinder()->GetRandomWaypointRadius(Pos, Radius);
 	pBotPlayer->m_TargetPos = vec2(TargetPos.x * 32, TargetPos.y * 32);
 
@@ -470,7 +479,7 @@ void CPlayerBot::GetThreadRandomRadiusWaypointTarget(CGS* pGameServer, CPlayerBo
 
 void CPlayerBot::ThreadMobsPathFinder()
 {
-	if(!m_pCharacter || !m_pCharacter->IsAlive())
+	if(!m_pCharacter || !m_pCharacter->IsAlive() || (m_TargetPos != vec2(0,0) && distance(m_TargetPos, m_OldTargetPos) < 48.0f))
 		return;
 
 	if(GetBotType() == TYPE_BOT_MOB)
@@ -489,7 +498,7 @@ void CPlayerBot::ThreadMobsPathFinder()
 	else if(GetBotType() == TYPE_BOT_EIDOLON)
 	{
 		int OwnerID = m_MobID;
-		if(const CPlayer* pPlayerOwner = GS()->GetPlayer(OwnerID, true, true); pPlayerOwner && m_TargetPos != vec2(0, 0) && Server()->Tick() % (Server()->TickSpeed() / 5) == 0)
+		if(const CPlayer* pPlayerOwner = GS()->GetPlayer(OwnerID, true, true); pPlayerOwner && m_TargetPos != vec2(0, 0) && Server()->Tick() % (Server()->TickSpeed() / 3) == 0)
 		{
 			std::thread(&FindThreadPath, GS(), this, m_ViewPos, m_TargetPos).detach();
 		}

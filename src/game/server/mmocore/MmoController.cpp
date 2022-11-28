@@ -21,7 +21,7 @@
 #include "Components/Quests/QuestCore.h"
 #include "Components/Skills/SkillsCore.h"
 #include "Components/Warehouse/WarehouseCore.h"
-#include "Components/Worlds/WorldSwapCore.h"
+#include "Components/Worlds/WorldCore.h"
 
 
 MmoController::MmoController(CGS *pGameServer) : m_pGameServer(pGameServer)
@@ -35,7 +35,7 @@ MmoController::MmoController(CGS *pGameServer) : m_pGameServer(pGameServer)
 	m_Components.add(m_pQuest = new QuestCore());
 	m_Components.add(m_pDungeonJob = new DungeonCore());
 	m_Components.add(new CAetherCore());
-	m_Components.add(m_pWorldSwapJob = new CWorldSwapCore());
+	m_Components.add(m_pWorldSwapJob = new CWorldDataCore());
 	m_Components.add(m_pHouseJob = new CHouseCore());
 	m_Components.add(m_pGuildJob = new GuildCore());
 	m_Components.add(m_pSkillJob = new CSkillsCore());
@@ -151,10 +151,11 @@ bool MmoController::OnPlayerHandleMainMenu(int ClientID, int Menulist)
 		auto ShowAttributeVote = [&](int HiddenID, AttributeType Type, std::function<void(int HiddenID)> pFunc)
 		{
 			pFunc(HiddenID);
-			for(const auto& [ID, Attribute] : CAttributeDescription::Data())
+			for(const auto& [ID, pAttribute] : CAttributeDescription::Data())
 			{
-				if(Attribute.IsType(Type) && Attribute.HasField())
-					GS()->AVD(ClientID, "UPGRADE", (int)ID, Attribute.GetUpgradePrice(), HiddenID, "{STR} {INT}P (Price {INT}P)", Attribute.GetName(), pPlayer->Acc().m_aStats[ID], Attribute.GetUpgradePrice());
+				if(pAttribute->IsType(Type) && pAttribute->HasField())
+					GS()->AVD(ClientID, "UPGRADE", (int)ID, pAttribute->GetUpgradePrice(), HiddenID, "{STR} {INT}P (Price {INT}P)", 
+						pAttribute->GetName(), pPlayer->Acc().m_aStats[ID], pAttribute->GetUpgradePrice());
 			}
 		};
 
@@ -311,12 +312,12 @@ void MmoController::SaveAccount(CPlayer *pPlayer, int Table) const
 	else if(Table == SAVE_UPGRADES)
 	{
 		dynamic_string Buffer;
-		for(const auto& [ID, Attribute] : CAttributeDescription::Data())
+		for(const auto& [ID, pAttribute] : CAttributeDescription::Data())
 		{
-			if(Attribute.HasField())
+			if(pAttribute->HasField())
 			{
 				char aBuf[64];
-				str_format(aBuf, sizeof(aBuf), ", %s = '%d' ", Attribute.GetFieldName(), pPlayer->Acc().m_aStats[ID]);
+				str_format(aBuf, sizeof(aBuf), ", %s = '%d' ", pAttribute->GetFieldName(), pPlayer->Acc().m_aStats[ID]);
 				Buffer.append_at(Buffer.length(), aBuf);
 			}
 		}
@@ -556,9 +557,9 @@ void MmoController::ConAsyncLinesForTranslate()
 			PushingDialogs(JsonData, Aether.GetName(), "aeth", ID);
 		}
 
-		for(auto& [ID, Item] : CAttributeDescription::Data())
+		for(auto& [ID, pAttribute] : CAttributeDescription::Data())
 		{
-			PushingDialogs(JsonData, Item.GetName(), "attb", (int)ID);
+			PushingDialogs(JsonData, pAttribute->GetName(), "attb", (int)ID);
 		}
 
 		for(auto& pItem : CItemDescription::Data())

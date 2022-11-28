@@ -26,6 +26,7 @@ class CCharacter : public CEntity
 	void FireWeapon();
 	void HandleWeaponSwitch();
 	void DoWeaponSwitch();
+	void HandleHookActions();
 	bool InteractiveHammer(vec2 Direction, vec2 ProjStartPos);
 	//void InteractiveGun(vec2 Direction, vec2 ProjStartPos);
 	//void InteractiveShotgun(vec2 Direction, vec2 ProjStartPos);
@@ -34,8 +35,10 @@ class CCharacter : public CEntity
 	bool DecoInteractive();
 	virtual void HandleTuning();
 	void HandleBuff(CTuningParams* TuningParams);
-	void HandleAuthedPlayer();
-	bool IsLockedWorld();
+	void HandlePlayer();
+
+	// return true if the world is closed
+	bool CheckAllowedWorld() const;
 
 protected:
 	int m_ReckoningTick; // tick that we are performing dead reckoning From
@@ -58,8 +61,8 @@ protected:
 	CNetObj_PlayerInput m_LatestInput;
 
 	void HandleWeapons();
-	void HandleTilesets(int *pIndex);
-	void HandleEvents();
+	void HandleTilesets(int *pIndex = nullptr);
+	void HandleEvent();
 	void HandleIndependentTuning();
 
 	void SetSafe(int FlagsDisallow = CHARACTERFLAG_HAMMER_HIT_DISABLED | CHARACTERFLAG_COLLISION_DISABLED | CHARACTERFLAG_HOOK_HIT_DISABLED);
@@ -91,6 +94,7 @@ public:
 	void ResetInput();
 	bool IsGrounded() const;
 	bool IsCollisionFlag(int Flag) const;
+	CPlayer* GetHookedPlayer() const;
 
 	bool IsAllowedPVP(int FromID) const;
 	bool IsAlive() const { return m_Alive; }

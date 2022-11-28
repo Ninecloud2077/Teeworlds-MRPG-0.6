@@ -13,7 +13,7 @@
 #include <game/server/mmocore/Components/Guilds/GuildCore.h>
 #include <game/server/mmocore/Components/Houses/HouseCore.h>
 #include <game/server/mmocore/Components/Quests/QuestCore.h>
-#include <game/server/mmocore/Components/Worlds/WorldSwapCore.h>
+#include <game/server/mmocore/Components/Worlds/WorldData.h>
 
 #include <game/server/mmocore/GameEntities/jobitems.h>
 #include <game/server/mmocore/GameEntities/snapfull.h>
@@ -73,6 +73,7 @@ bool CCharacter::Spawn(CPlayer *pPlayer, vec2 Pos)
 	m_Core.m_CollisionDisabled = false;
 	m_Event = TILE_CLEAR_EVENTS;
 	m_Core.m_WorldID = m_pPlayer->GetPlayerWorldID();
+
 	if(!m_pPlayer->IsBot())
 	{
 		m_pPlayer->m_MoodState = m_pPlayer->GetMoodState();
@@ -126,6 +127,13 @@ bool CCharacter::IsCollisionFlag(int Flag) const
 	if(GS()->Collision()->CheckPoint(m_Pos.x-GetProximityRadius()/2, m_Pos.y-GetProximityRadius()/2+10, Flag))
 		return true;
 	return false;
+}
+
+CPlayer* CCharacter::GetHookedPlayer() const
+{
+	if(m_Core.m_HookedPlayer > 0 && m_Core.m_HookedPlayer < MAX_CLIENTS)
+		return GS()->m_apPlayers[m_Core.m_HookedPlayer];
+	return nullptr;
 }
 
 void CCharacter::DoWeaponSwitch()
@@ -198,7 +206,7 @@ bool CCharacter::DecoInteractive()
 			{
 				GS()->Chat(ClientID, "You added {STR}, to your house!", GS()->GetItemInfo(DecoID)->GetName());
 				m_pPlayer->GetItem(DecoID)->Remove(1);
-				GS()->UpdateVotes(ClientID, MenuList::MENU_HOUSE_DECORATION);
+				GS()->UpdateVotes(ClientID, MENU_HOUSE_DECORATION);
 				return true;
 			}
 		}
@@ -209,14 +217,14 @@ bool CCharacter::DecoInteractive()
 			{
 				GS()->Chat(ClientID, "You added {STR}, to your guild house!", GS()->GetItemInfo(DecoID)->GetName());
 				m_pPlayer->GetItem(DecoID)->Remove(1);
-				GS()->UpdateVotes(ClientID, MenuList::MENU_GUILD_HOUSE_DECORATION);
+				GS()->UpdateVotes(ClientID, MENU_GUILD_HOUSE_DECORATION);
 				return true;
 			}
 		}
 
 		GS()->Chat(ClientID, "Distance House and Decoration maximal {INT} block!", g_Config.m_SvLimitDecoration);
 		GS()->Chat(ClientID, "Setting object reset, use repeat!");
-		GS()->UpdateVotes(ClientID, MenuList::MENU_HOUSE_DECORATION);
+		GS()->UpdateVotes(ClientID, MENU_HOUSE_DECORATION);
 		return true;
 	}
 	return false;
@@ -423,7 +431,46 @@ void CCharacter::HandleWeapons()
 			m_Core.m_aWeapons[m_Core.m_ActiveWeapon].m_AmmoRegenStart = -1;
 		}
 	}
+
+	HandleHookActions();
 }
+
+void CCharacter::HandleHookActions()
+{
+	int ClientID = m_pPlayer->GetCID();
+
+	CPlayer* pHookedPlayer = GetHookedPlayer();
+	if(pHookedPlayer && pHookedPlayer->GetCharacter())
+	{
+		// poison hook :: damage increase with hammer damage
+		if(Server()->Tick() % (Server()->TickSpeed() / 2) == 0)
+		{
+			if(m_pPlayer->GetItem(itPoisonHook)->IsEquipped())
+				pHookedPlayer->GetCharacter()->TakeDamage({}, 1, ClientID, WEAPON_HAMMER);
+		}
+	}
+	else
+	{
+		// spider hook
+		if(m_Core.m_HookState == HOOK_FLYING && m_pPlayer->GetItem(itSpiderHook)->IsEquipped())
+		{
+			float Distance = min((float)m_pPlayer->m_NextTuningParams.m_HookLength - m_pPlayer->m_NextTuningParams.m_HookFireSpeed, distance(GetMousePos(), m_Core.m_Pos));
+			if(distance(m_Core.m_Pos, m_Core.m_HookPos) > Distance)
+			{
+				m_Core.m_HookState = HOOK_GRABBED;
+				m_Core.m_TriggeredEvents |= COREEVENT_HOOK_ATTACH_GROUND;
+			}
+		}
+	}
+
+	// explode hook
+	if((m_Core.m_TriggeredEvents & COREEVENT_HOOK_ATTACH_GROUND && distance(m_Core.m_HookPos, m_Core.m_Pos) > 48.0f) || m_Core.m_TriggeredEvents & COREEVENT_HOOK_ATTACH_PLAYER)
+	{
+		if(m_pPlayer->GetItem(itExplodeImpulseHook)->IsEquipped())
+			GS()->CreateExplosion(m_Core.m_HookPos, ClientID, WEAPON_GRENADE, 1);
+	}
+}
+
 
 bool CCharacter::GiveWeapon(int Weapon, int Ammo)
 {
@@ -517,54 +564,64 @@ void CCharacter::ResetInput()
 
 void CCharacter::Tick()
 {
-	if(!IsAlive())
+	if(!m_Alive)
 		return;
 
 	// check safe area
 	ResetSafe();
 	if(m_SafeAreaForTick || GS()->Collision()->CheckPoint(m_Core.m_Pos, CCollision::COLFLAG_SAFE_AREA))
-	{
 		SetSafe();
+
+	// check allowed world for player
+	if(CheckAllowedWorld())
+	{
+		m_pPlayer->GetTempData().m_TempTeleportPos = vec2(-1, -1);
+		GS()->Chat(m_pPlayer->GetCID(), "This chapter is still closed, you magically transported first zone!");
+		m_pPlayer->ChangeWorld(MAIN_WORLD_ID);
+		return;
 	}
 
+	// handle player
+	HandlePlayer();
+
+	// handle tiles
 	// safe change world data from tick
 	int Index = TILE_AIR;
 	HandleTilesets(&Index);
 	if(GetHelper()->TileEnter(Index, TILE_WORLD_SWAP))
 	{
-		GS()->Mmo()->WorldSwap()->ChangeWorld(m_pPlayer, m_Core.m_Pos);
+		GS()->GetWorldData()->Move(m_pPlayer);
 		return;
 	}
 	else if(GetHelper()->TileExit(Index, TILE_WORLD_SWAP)) {}
 
+	// handle
+	HandleWeapons();
 	HandleTuning();
+
+	// core
 	m_Core.m_Input = m_Input;
 	m_Core.Tick(true, &m_pPlayer->m_NextTuningParams);
-
 	m_pPlayer->UpdateTempData(m_Health, m_Mana);
 
+	// game clipped
 	if(GameLayerClipped(m_Pos))
 		Die(m_pPlayer->GetCID(), WEAPON_SELF);
 
-	if (!m_DoorHit)
+	// door
+	if(!m_DoorHit)
 	{
 		m_OlderPos = m_OldPos;
 		m_OldPos = m_Core.m_Pos;
 	}
-
-	HandleWeapons();
-
-	if (IsLockedWorld())
-		return;
-
-	HandleAuthedPlayer();
 }
 
 void CCharacter::TickDeferred()
 {
-	if(!IsAlive())
+	if(!m_Alive)
 		return;
-		
+
+	// door reset
 	if(m_DoorHit)
 	{
 		ResetDoorPos();
@@ -668,11 +725,11 @@ void CCharacter::Die(int Killer, int Weapon)
 		}
 	}
 
-	m_pPlayer->m_aPlayerTick[TickState::Respawn] = Server()->Tick() + Server()->TickSpeed() / 2;
-	if(m_pPlayer->GetBotType() == BotsTypes::TYPE_BOT_MOB)
+	m_pPlayer->m_aPlayerTick[Respawn] = Server()->Tick() + Server()->TickSpeed() / 2;
+	if(m_pPlayer->GetBotType() == TYPE_BOT_MOB)
 	{
 		const int SubBotID = m_pPlayer->GetBotMobID();
-		m_pPlayer->m_aPlayerTick[TickState::Respawn] = Server()->Tick() + MobBotInfo::ms_aMobBot[SubBotID].m_RespawnTick*Server()->TickSpeed();
+		m_pPlayer->m_aPlayerTick[Respawn] = Server()->Tick() + MobBotInfo::ms_aMobBot[SubBotID].m_RespawnTick*Server()->TickSpeed();
 	}
 
 	// a nice sound
@@ -686,7 +743,7 @@ void CCharacter::Die(int Killer, int Weapon)
 	Msg.m_Victim = m_pPlayer->GetCID();
 	Msg.m_Weapon = Weapon;
 	Msg.m_ModeSpecial = 0;
-	Server()->SendPackMsg(&Msg, MSGFLAG_VITAL, -1, GS()->GetWorldID());
+	Server()->SendPackMsg(&Msg, MSGFLAG_VITAL, -1, -1, GS()->GetWorldID());
 
 	// respawn
 	m_pPlayer->m_aPlayerTick[TickState::Die] = Server()->Tick()/2;
@@ -797,12 +854,15 @@ bool CCharacter::TakeDamage(vec2 Force, int Dmg, int FromCID, int Weapon)
 		return false;
 	}
 
-	// health recovery potion
-	if(!m_pPlayer->IsBot() && m_Health <= m_pPlayer->GetStartHealth() / 3)
+	// health recovery potion worker health potions
+	if(m_pPlayer->m_aPlayerTick[PotionRecast] < Server()->Tick() && !m_pPlayer->IsBot() && m_Health <= m_pPlayer->GetStartHealth() / 3)
 	{
-		CPlayerItem* pPlayerItem = m_pPlayer->GetItem(itPotionHealthRegen);
-		if(!m_pPlayer->IsActiveEffect("RegenHealth") && pPlayerItem->IsEquipped())
-			pPlayerItem->Use(1);
+		std::for_each(PotionTools::Heal::getList().begin(), PotionTools::Heal::getList().end(), [this](const PotionTools::Heal& p)
+		{
+			CPlayerItem* pPlayerItem = m_pPlayer->GetItem(p.getItemID());
+			if(!m_pPlayer->IsActiveEffect(p.getEffect()) && pPlayerItem->IsEquipped())
+				pPlayerItem->Use(1);
+		});
 	}
 
 	GS()->CreateSound(m_Pos, IsCriticalDamage ? (int)SOUND_PLAYER_PAIN_LONG : (int)SOUND_PLAYER_PAIN_SHORT);
@@ -939,11 +999,13 @@ void CCharacter::PostSnap()
 
 void CCharacter::HandleTilesets(int* pIndex)
 {
-	if(!m_Alive)
-		return;
-
 	// get index tileset char pos component items
-	const int Tile = (*pIndex) = GS()->Collision()->GetParseTilesAt(m_Core.m_Pos.x, m_Core.m_Pos.y);
+	const int Tile = GS()->Collision()->GetParseTilesAt(m_Core.m_Pos.x, m_Core.m_Pos.y);
+	if(pIndex)
+	{
+		(*pIndex) = Tile;
+	}
+
 	if(!m_pPlayer->IsBot() && GS()->Mmo()->OnPlayerHandleTile(this, Tile))
 		return;
 
@@ -962,7 +1024,7 @@ void CCharacter::HandleTilesets(int* pIndex)
 	}
 }
 
-void CCharacter::HandleEvents()
+void CCharacter::HandleEvent()
 {
 	if(m_Event == TILE_EVENT_PARTY)
 	{
@@ -1084,16 +1146,18 @@ void CCharacter::HandleBuff(CTuningParams* TuningParams)
 			const int PoisonSize = translate_to_percent_rest(m_pPlayer->GetStartHealth(), 3);
 			TakeDamage(vec2(0, 0), PoisonSize, m_pPlayer->GetCID(), WEAPON_SELF);
 		}
-		if(m_pPlayer->IsActiveEffect("RegenHealth"))
-		{
-			const int RestoreHealth = translate_to_percent_rest(m_pPlayer->GetStartHealth(), 3);
-			IncreaseHealth(RestoreHealth);
-		}
 		if(m_pPlayer->IsActiveEffect("RegenMana"))
 		{
 			const int RestoreMana = translate_to_percent_rest(m_pPlayer->GetStartMana(), 5);
 			IncreaseMana(RestoreMana);
 		}
+
+		// worker health potions
+		std::for_each(PotionTools::Heal::getList().begin(), PotionTools::Heal::getList().end(), [this](const PotionTools::Heal& p)
+		{
+			if(m_pPlayer->IsActiveEffect(p.getEffect()))
+				IncreaseHealth(p.getRecovery());
+		});
 	}
 }
 
@@ -1143,7 +1207,7 @@ void CCharacter::UpdateEquipingStats(int ItemID)
 		m_AmmoRegen = m_pPlayer->GetAttributeSize(AttributeIdentifier::AmmoRegen, true);
 }
 
-void CCharacter::HandleAuthedPlayer()
+void CCharacter::HandlePlayer()
 {
 	if(!m_pPlayer->IsAuthed())
 		return;
@@ -1152,7 +1216,8 @@ void CCharacter::HandleAuthedPlayer()
 	if(m_Mana < m_pPlayer->GetStartMana() && Server()->Tick() % (Server()->TickSpeed() * 3) == 0)
 		IncreaseMana(m_pPlayer->GetStartMana() / 20);
 
-	HandleEvents();
+	// handle
+	HandleEvent();
 }
 
 bool CCharacter::IsAllowedPVP(int FromID) const
@@ -1160,10 +1225,10 @@ bool CCharacter::IsAllowedPVP(int FromID) const
 	CPlayer* pFrom = GS()->GetPlayer(FromID, false, true);
 
 	// eidolon
-	if(pFrom && pFrom->IsBot() && pFrom->GetBotType() == BotsTypes::TYPE_BOT_EIDOLON)
+	if(pFrom && pFrom->IsBot() && pFrom->GetBotType() == TYPE_BOT_EIDOLON)
 	{
 		// enable damage from eidolon to mobs
-		if(m_pPlayer->IsBot() && m_pPlayer->GetBotType() == BotsTypes::TYPE_BOT_MOB)
+		if(m_pPlayer->IsBot() && m_pPlayer->GetBotType() == TYPE_BOT_MOB)
 			return true;
 
 		// dissalow  damage from self eidolon
@@ -1176,7 +1241,8 @@ bool CCharacter::IsAllowedPVP(int FromID) const
 		return false;
 
 	// pvp only for mobs
-	if((m_pPlayer->IsBot() && m_pPlayer->GetBotType() != BotsTypes::TYPE_BOT_MOB) || (pFrom->IsBot() && pFrom->GetBotType() != BotsTypes::TYPE_BOT_MOB))
+	if((m_pPlayer->IsBot() && m_pPlayer->GetBotType() != TYPE_BOT_MOB) || (pFrom->IsBot() && pFrom->GetBotType() !=
+		TYPE_BOT_MOB))
 		return false;
 
 	// disable damage on invisible wall
@@ -1209,21 +1275,16 @@ bool CCharacter::IsAllowedPVP(int FromID) const
 	return true;
 }
 
-bool CCharacter::IsLockedWorld()
+bool CCharacter::CheckAllowedWorld() const
 {
-	if(m_Alive && (Server()->Tick() % Server()->TickSpeed() * 3) == 0  && m_pPlayer->IsAuthed())
+	if(Server()->Tick() % Server()->TickSpeed() * 3 == 0 && m_pPlayer->IsAuthed())
 	{
-		const int NecessaryQuest = GS()->Mmo()->WorldSwap()->GetNecessaryQuest();
-		if(NecessaryQuest > 0 && !m_pPlayer->GetQuest(NecessaryQuest).IsComplected())
+		CQuestDataInfo* pQuestInfo = GS()->GetWorldData()->GetRequiredQuest();
+		if(pQuestInfo && !m_pPlayer->GetQuest(pQuestInfo->m_QuestID).IsComplected())
 		{
 			const int CheckHouseID = GS()->Mmo()->Member()->GetPosHouseID(m_Core.m_Pos);
 			if(CheckHouseID <= 0)
-			{
-				m_pPlayer->GetTempData().m_TempTeleportPos = vec2(-1, -1);
-				GS()->Chat(m_pPlayer->GetCID(), "This chapter is still closed, you magically transported first zone!");
-				m_pPlayer->ChangeWorld(MAIN_WORLD_ID);
 				return true;
-			}
 		}
 	}
 	return false;
@@ -1253,6 +1314,8 @@ void CCharacter::ChangePosition(vec2 NewPos)
 	GS()->CreateDeath(m_Core.m_Pos, m_pPlayer->GetCID());
 	GS()->CreatePlayerSpawn(NewPos);
 	m_Core.m_Pos = NewPos;
+	m_Pos = NewPos;
+	ResetHook();
 }
 
 void CCharacter::ResetDoorPos()
@@ -1271,8 +1334,9 @@ bool CCharacter::StartConversation(CPlayer *pTarget)
 
 	// skip if not NPC, or it is not drawn
 	CPlayerBot* pTargetBot = static_cast<CPlayerBot*>(pTarget);
-	if (!pTargetBot || pTargetBot->GetBotType() == BotsTypes::TYPE_BOT_MOB 
-		|| pTargetBot->GetBotType() == BotsTypes::TYPE_BOT_EIDOLON 
+	if (!pTargetBot || pTargetBot->GetBotType() == TYPE_BOT_MOB
+		|| pTargetBot->GetBotType() == TYPE_BOT_EIDOLON
+		|| (pTarget->GetBotType() == TYPE_BOT_QUEST && !QuestBotInfo::ms_aQuestBot[pTarget->GetBotMobID()].m_HasAction)
 		|| !pTargetBot->IsVisibleForClient(m_pPlayer->GetCID()))
 		return false;
 	return true;
